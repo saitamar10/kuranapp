@@ -3,7 +3,6 @@ import { View, Text, SafeAreaView, TouchableOpacity, ActivityIndicator, Alert, A
 import { MapPin, Navigation, RefreshCw } from 'lucide-react-native';
 import { turkishCities, calculateQiblaDirection } from '@/data/quranData';
 import * as Location from 'expo-location';
-import { Magnetometer } from 'expo-sensors';
 
 export default function QiblaScreen() {
   const [qiblaDirection, setQiblaDirection] = useState(0);
@@ -70,32 +69,47 @@ export default function QiblaScreen() {
     }
   };
 
-  // Magnetometer for live compass
+  // Magnetometer for live compass (only on native platforms)
   useEffect(() => {
     let subscription: any;
+    let Magnetometer: any = null;
 
     const startMagnetometer = async () => {
-      const isAvailable = await Magnetometer.isAvailableAsync();
-      setIsMagnetometerAvailable(isAvailable);
+      // Skip on web platform
+      if (Platform.OS === 'web') {
+        setIsMagnetometerAvailable(false);
+        return;
+      }
 
-      if (isAvailable) {
-        Magnetometer.setUpdateInterval(100);
+      try {
+        // Dynamic import for native only
+        const sensors = await import('expo-sensors');
+        Magnetometer = sensors.Magnetometer;
         
-        subscription = Magnetometer.addListener((data) => {
-          let angle = Math.atan2(data.y, data.x) * (180 / Math.PI);
-          angle = (angle + 360) % 360;
-          // Adjust for device orientation (pointing north)
-          angle = (360 - angle) % 360;
+        const isAvailable = await Magnetometer.isAvailableAsync();
+        setIsMagnetometerAvailable(isAvailable);
+
+        if (isAvailable) {
+          Magnetometer.setUpdateInterval(100);
           
-          setCompassHeading(angle);
-          
-          Animated.timing(rotateAnim, {
-            toValue: angle,
-            duration: 150,
-            easing: Easing.out(Easing.ease),
-            useNativeDriver: true,
-          }).start();
-        });
+          subscription = Magnetometer.addListener((data: any) => {
+            let angle = Math.atan2(data.y, data.x) * (180 / Math.PI);
+            angle = (angle + 360) % 360;
+            // Adjust for device orientation (pointing north)
+            angle = (360 - angle) % 360;
+            
+            setCompassHeading(angle);
+            
+            Animated.timing(rotateAnim, {
+              toValue: angle,
+              duration: 150,
+              easing: Easing.out(Easing.ease),
+              useNativeDriver: true,
+            }).start();
+          });
+        }
+      } catch (error) {
+        setIsMagnetometerAvailable(false);
       }
     };
 
