@@ -1,6 +1,6 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { View, Text, SafeAreaView, TouchableOpacity, ActivityIndicator, Alert, Animated, Easing, Platform } from 'react-native';
-import { MapPin, Navigation, RefreshCw } from 'lucide-react-native';
+import { MapPin, Navigation, RefreshCw, Compass } from 'lucide-react-native';
 import { turkishCities, calculateQiblaDirection } from '@/data/quranData';
 import * as Location from 'expo-location';
 
@@ -11,8 +11,10 @@ export default function QiblaScreen() {
   const [userCoords, setUserCoords] = useState<{ lat: number; lng: number } | null>(null);
   const [compassHeading, setCompassHeading] = useState(0);
   const [isMagnetometerAvailable, setIsMagnetometerAvailable] = useState(false);
+  const [sensorStatus, setSensorStatus] = useState('Sensör kontrol ediliyor...');
   const compassAnim = useRef(new Animated.Value(0)).current;
   const qiblaArrowAnim = useRef(new Animated.Value(0)).current;
+  const lastAngle = useRef(0);
 
   const getLocation = async () => {
     setIsLoading(true);
@@ -70,68 +72,180 @@ export default function QiblaScreen() {
     }
   };
 
-  // Magnetometer for live compass (only on native platforms)
+  // Smooth angle transition to avoid jumps at 0/360 boundary
+  const smoothAngle = useCallback((newAngle: number, prevAngle: number) => {
+    let diff = newAngle - prevAngle;
+    if (diff > 180) diff -= 360;
+    if (diff < -180) diff += 360;
+    return prevAngle + diff;
+  }, []);
+
+  const updateCompass = useCallback((angle: number) => {
+    const smoothedAngle = smoothAngle(angle, lastAngle.current);
+    lastAngle.current = smoothedAngle;
+    
+    setCompassHeading(Math.round(angle));
+    
+    Animated.timing(compassAnim, {
+      toValue: smoothedAngle,
+      duration: 100,
+      easing: Easing.out(Easing.ease),
+      useNativeDriver: true,
+    }).start();
+    
+    const qiblaArrowAngle = (qiblaDirection - smoothedAngle + 720) % 360;
+    Animated.timing(qiblaArrowAnim, {
+      toValue: qiblaArrowAngle,
+      duration: 100,
+      easing: Easing.out(Easing.ease),
+      useNativeDriver: true,
+    }).start();
+  }, [qiblaDirection, smoothAngle, compassAnim, qiblaArrowAnim]);
+
+  // Magnetometer for live compass
   useEffect(() => {
     let subscription: any;
     let Magnetometer: any = null;
+    let DeviceMotion: any = null;
+    let orientationHandler: ((event: DeviceOrientationEvent) => void) | null = null;
 
-    const startMagnetometer = async () => {
-      // Skip on web platform
+    const startCompass = async () => {
+      // For web platform, try DeviceOrientation API
       if (Platform.OS === 'web') {
-        setIsMagnetometerAvailable(false);
+        setSensorStatus('Web sensörü kontrol ediliyor...');
+        
+        try {
+          if (typeof window !== 'undefined' && 'DeviceOrientationEvent' in window) {
+            orientationHandler = (event: DeviceOrientationEvent) => {
+              // webkitCompassHeading for iOS (absolute compass), alpha for Android
+              let angle: number;
+              
+              if ((event as any).webkitCompassHeading !== undefined) {
+                // iOS - webkitCompassHeading is already absolute compass heading
+                angle = (event as any).webkitCompassHeading;
+              } else if (event.alpha !== null && event.alpha !== undefined) {
+                // Android - alpha is relative to initial orientation
+                // Check if absolute is available
+                if ((event as any).absolute === true) {
+                  angle = (360 - event.alpha) % 360;
+                } else {
+                  angle = (360 - event.alpha) % 360;
+                }
+              } else {
+                return;
+              }
+              
+              updateCompass(angle);
+            };
+
+            // For iOS 13+, need to request permission
+            if (typeof (DeviceOrientationEvent as any).requestPermission === 'function') {
+              setSensorStatus('iOS izni bekleniyor...');
+              try {
+                const permission = await (DeviceOrientationEvent as any).requestPermission();
+                if (permission === 'granted') {
+                  setIsMagnetometerAvailable(true);
+                  setSensorStatus('Pusula aktif');
+                  window.addEventListener('deviceorientation', orientationHandler, true);
+                } else {
+                  setIsMagnetometerAvailable(false);
+                  setSensorStatus('İzin reddedildi');
+                }
+              } catch (e) {
+                setIsMagnetometerAvailable(false);
+                setSensorStatus('İzin hatası');
+              }
+            } else {
+              // For Android and older iOS - add listener and check if it fires
+              setIsMagnetometerAvailable(true);
+              setSensorStatus('Pusula aktif');
+              window.addEventListener('deviceorientation', orientationHandler, true);
+              
+              // Check if events are actually firing after a short delay
+              setTimeout(() => {
+                if (compassHeading === 0) {
+                  // No events received, might not have compass
+                  setSensorStatus('Sensör verisi bekleniyor...');
+                }
+              }, 2000);
+            }
+          } else {
+            setIsMagnetometerAvailable(false);
+            setSensorStatus('DeviceOrientation desteklenmiyor');
+          }
+        } catch (e) {
+          setIsMagnetometerAvailable(false);
+          setSensorStatus('Web sensör hatası');
+        }
         return;
       }
 
+      // Native platforms - try Magnetometer first, then DeviceMotion
+      setSensorStatus('Native sensör kontrol ediliyor...');
+      
       try {
-        // Dynamic import for native only
         const sensors = await import('expo-sensors');
         Magnetometer = sensors.Magnetometer;
+        DeviceMotion = sensors.DeviceMotion;
         
-        const isAvailable = await Magnetometer.isAvailableAsync();
-        setIsMagnetometerAvailable(isAvailable);
-
-        if (isAvailable) {
+        // Try Magnetometer first
+        setSensorStatus('Magnetometer kontrol ediliyor...');
+        const isMagAvailable = await Magnetometer.isAvailableAsync();
+        
+        if (isMagAvailable) {
+          setIsMagnetometerAvailable(true);
+          setSensorStatus('Magnetometer aktif');
           Magnetometer.setUpdateInterval(100);
           
           subscription = Magnetometer.addListener((data: any) => {
+            // Calculate heading from magnetometer data
             let angle = Math.atan2(data.y, data.x) * (180 / Math.PI);
             angle = (angle + 360) % 360;
-            // Adjust for device orientation (pointing north)
             angle = (360 - angle) % 360;
             
-            setCompassHeading(angle);
-            
-            // Animate compass rotation
-            Animated.timing(compassAnim, {
-              toValue: angle,
-              duration: 150,
-              easing: Easing.out(Easing.ease),
-              useNativeDriver: true,
-            }).start();
-            
-            // Animate qibla arrow - it should point to qibla relative to current heading
-            const qiblaArrowAngle = (qiblaDirection - angle + 360) % 360;
-            Animated.timing(qiblaArrowAnim, {
-              toValue: qiblaArrowAngle,
-              duration: 150,
-              easing: Easing.out(Easing.ease),
-              useNativeDriver: true,
-            }).start();
+            updateCompass(angle);
           });
+        } else {
+          // Fallback to DeviceMotion
+          setSensorStatus('DeviceMotion kontrol ediliyor...');
+          const isMotionAvailable = await DeviceMotion.isAvailableAsync();
+          
+          if (isMotionAvailable) {
+            setIsMagnetometerAvailable(true);
+            setSensorStatus('DeviceMotion aktif');
+            DeviceMotion.setUpdateInterval(100);
+            
+            subscription = DeviceMotion.addListener((data: any) => {
+              if (data.rotation && data.rotation.alpha !== undefined) {
+                // Convert rotation to compass heading
+                let angle = (data.rotation.alpha * (180 / Math.PI) + 360) % 360;
+                updateCompass(angle);
+              }
+            });
+          } else {
+            setIsMagnetometerAvailable(false);
+            setSensorStatus('Sensör bulunamadı');
+          }
         }
       } catch (error) {
+        console.log('Sensor error:', error);
         setIsMagnetometerAvailable(false);
+        setSensorStatus('Sensör hatası: ' + (error as Error).message);
       }
     };
 
-    startMagnetometer();
+    startCompass();
 
     return () => {
       if (subscription) {
         subscription.remove();
       }
+      // Remove web event listener
+      if (Platform.OS === 'web' && typeof window !== 'undefined' && orientationHandler) {
+        window.removeEventListener('deviceorientation', orientationHandler, true);
+      }
     };
-  }, [qiblaDirection]);
+  }, [updateCompass]);
 
   // Initialize qibla arrow when qiblaDirection changes
   useEffect(() => {
@@ -239,8 +353,17 @@ export default function QiblaScreen() {
             <View className="items-center">
               <Text className="text-white/80 text-base mb-2">Kıble Yönü</Text>
               <Text className="text-white text-5xl font-bold mb-1">{Math.round(qiblaDirection)}°</Text>
+              
+              {/* Compass Status */}
+              <View className="flex-row items-center mb-2">
+                <Compass size={14} color={isMagnetometerAvailable ? "#4ECDC4" : "#ff6b6b"} />
+                <Text className={`ml-2 text-xs ${isMagnetometerAvailable ? 'text-[#4ECDC4]' : 'text-red-400'}`}>
+                  {sensorStatus}
+                </Text>
+              </View>
+              
               {isMagnetometerAvailable && (
-                <Text className="text-[#C9A227] text-sm mb-4">Pusula: {Math.round(compassHeading)}°</Text>
+                <Text className="text-[#C9A227] text-sm mb-4">Pusula: {compassHeading}°</Text>
               )}
               
               <View className="bg-white/10 rounded-2xl p-4 w-full">
@@ -269,7 +392,9 @@ export default function QiblaScreen() {
             <Text className="text-white/60 text-center text-sm mt-6 px-4">
               {isMagnetometerAvailable 
                 ? 'Telefonunuzu düz tutun, pusula otomatik döner. Altın ok Kabe yönünü gösterir.'
-                : 'Pusula sensörü bulunamadı. Kıble yönü statik olarak gösteriliyor.'}
+                : Platform.OS === 'web' 
+                  ? 'Web tarayıcısında pusula için HTTPS gereklidir. Mobil cihazda açın veya kıble yönünü manuel takip edin.'
+                  : 'Cihazınızda pusula sensörü bulunamadı. Kıble yönü statik olarak gösteriliyor.'}
             </Text>
           </>
         )}
