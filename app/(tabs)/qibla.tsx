@@ -11,7 +11,8 @@ export default function QiblaScreen() {
   const [userCoords, setUserCoords] = useState<{ lat: number; lng: number } | null>(null);
   const [compassHeading, setCompassHeading] = useState(0);
   const [isMagnetometerAvailable, setIsMagnetometerAvailable] = useState(false);
-  const rotateAnim = useRef(new Animated.Value(0)).current;
+  const compassAnim = useRef(new Animated.Value(0)).current;
+  const qiblaArrowAnim = useRef(new Animated.Value(0)).current;
 
   const getLocation = async () => {
     setIsLoading(true);
@@ -100,8 +101,18 @@ export default function QiblaScreen() {
             
             setCompassHeading(angle);
             
-            Animated.timing(rotateAnim, {
+            // Animate compass rotation
+            Animated.timing(compassAnim, {
               toValue: angle,
+              duration: 150,
+              easing: Easing.out(Easing.ease),
+              useNativeDriver: true,
+            }).start();
+            
+            // Animate qibla arrow - it should point to qibla relative to current heading
+            const qiblaArrowAngle = (qiblaDirection - angle + 360) % 360;
+            Animated.timing(qiblaArrowAnim, {
+              toValue: qiblaArrowAngle,
               duration: 150,
               easing: Easing.out(Easing.ease),
               useNativeDriver: true,
@@ -120,16 +131,30 @@ export default function QiblaScreen() {
         subscription.remove();
       }
     };
-  }, []);
+  }, [qiblaDirection]);
+
+  // Initialize qibla arrow when qiblaDirection changes
+  useEffect(() => {
+    if (qiblaDirection > 0) {
+      qiblaArrowAnim.setValue(qiblaDirection);
+    }
+  }, [qiblaDirection]);
 
   useEffect(() => {
     getLocation();
   }, []);
 
   // Calculate the rotation needed to point to Qibla
-  const qiblaRotation = rotateAnim.interpolate({
+  // When user rotates phone, compass rotates opposite direction
+  const compassRotation = compassAnim.interpolate({
     inputRange: [0, 360],
     outputRange: ['0deg', '-360deg'],
+  });
+  
+  // Qibla arrow rotation with animation
+  const qiblaArrowRotation = qiblaArrowAnim.interpolate({
+    inputRange: [0, 360],
+    outputRange: ['0deg', '360deg'],
   });
 
   return (
@@ -158,7 +183,7 @@ export default function QiblaScreen() {
                   backgroundColor: 'rgba(255,255,255,0.1)',
                   alignItems: 'center',
                   justifyContent: 'center',
-                  transform: [{ rotate: qiblaRotation }],
+                  transform: [{ rotate: compassRotation }],
                 }}
               >
                 {/* Cardinal Directions */}
@@ -174,38 +199,40 @@ export default function QiblaScreen() {
                 <View className="absolute right-2">
                   <Text className="text-white/60 font-bold text-lg">D</Text>
                 </View>
-
-                {/* Qibla Arrow - points to Qibla direction */}
-                <View
-                  style={{
-                    position: 'absolute',
-                    transform: [{ rotate: `${qiblaDirection}deg` }],
-                  }}
-                >
-                  <View className="items-center">
-                    <View className="w-1 h-24 bg-[#C9A227] rounded-full" />
-                    <View 
-                      style={{
-                        position: 'absolute',
-                        top: -10,
-                        width: 0,
-                        height: 0,
-                        borderLeftWidth: 10,
-                        borderRightWidth: 10,
-                        borderBottomWidth: 20,
-                        borderLeftColor: 'transparent',
-                        borderRightColor: 'transparent',
-                        borderBottomColor: '#C9A227',
-                      }}
-                    />
-                  </View>
-                </View>
-
-                {/* Kaaba Icon */}
-                <View className="w-16 h-16 bg-[#C9A227] rounded-lg items-center justify-center">
-                  <Text className="text-2xl">🕋</Text>
+              </Animated.View>
+              
+              {/* Qibla Arrow - Always points to actual Qibla */}
+              <Animated.View
+                style={{
+                  position: 'absolute',
+                  transform: [{ rotate: qiblaArrowRotation }],
+                }}
+              >
+                <View className="items-center">
+                  <View className="w-1 h-24 bg-[#C9A227] rounded-full" />
+                  <View 
+                    style={{
+                      position: 'absolute',
+                      top: -10,
+                      width: 0,
+                      height: 0,
+                      borderLeftWidth: 10,
+                      borderRightWidth: 10,
+                      borderBottomWidth: 20,
+                      borderLeftColor: 'transparent',
+                      borderRightColor: 'transparent',
+                      borderBottomColor: '#C9A227',
+                    }}
+                  />
                 </View>
               </Animated.View>
+
+              {/* Kaaba Icon in center */}
+              <View 
+                className="absolute w-16 h-16 bg-[#C9A227] rounded-lg items-center justify-center"
+              >
+                <Text className="text-2xl">🕋</Text>
+              </View>
             </View>
 
             {/* Direction Info */}
